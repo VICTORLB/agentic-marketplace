@@ -1,0 +1,35 @@
+# Automatic AI review on every PR. Claude Code runs inside the repo, so it picks up CLAUDE.md and
+# .claude/agents/code-reviewer.md. Requires the ANTHROPIC_API_KEY secret (or swap to claude_code_oauth_token).
+name: Claude PR review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request using the checklist and severity scale in .claude/agents/code-reviewer.md
+            and the non-negotiables in CLAUDE.md. The PR branch is already checked out.
+
+            Use `mcp__github_inline_comment__create_inline_comment` (with `confirmed: true`) for line-specific
+            findings and post one `gh pr comment` with the findings table and the verdict
+            (APPROVE or CHANGES REQUESTED). Only post GitHub comments.
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*)"

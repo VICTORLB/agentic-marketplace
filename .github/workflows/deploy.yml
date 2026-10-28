@@ -1,0 +1,103 @@
+# Continuous deployment to Cloud Run on every merge to main.
+# Keyless auth via Workload Identity Federation (no JSON keys). The "production" environment makes GitHub record
+# each run as a deployment, which scripts/dora.sh reads for DORA metrics.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  SERVICE: marketplace-api
+  REGION: ${{ vars.GCP_REGION }}
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  IMAGE: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/marketplace/marketplace-api:${{ github.sha }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - run: mvn -B verify
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOYER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build and push image
+        run: |
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Remember current revision (for rollback)
+        id: previous
+        run: |
+          rev=$(gcloud run services describe "$SERVICE" --region "$REGION" \
+                --format='value(status.latestReadyRevisionName)' 2>/dev/null || true)
+          echo "revision=$rev" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.SERVICE }}
+          region: ${{ env.REGION }}
+          image: ${{ env.IMAGE }}
+          flags: >-
+            --service-account=${{ vars.RUNTIME_SA }}
+            --allow-unauthenticated
+            --min-instances=0
+            --max-instances=3
+            --cpu=1
+            --memory=512Mi
+            --timeout=30
+          env_vars: |
+            PUBSUB_TOPIC=offer-events
+            PUSH_AUDIENCE=marketplace-pubsub-push
+            PUSH_SERVICE_ACCOUNT=${{ vars.PUSH_SA }}
+
+      - name: Send all traffic to the new revision
+        # Needed if a previous rollback pinned traffic to an older revision.
+        run: gcloud run services update-traffic "$SERVICE" --region "$REGION" --to-latest
+
+      - name: Smoke test, roll back on failure
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          PREVIOUS: ${{ steps.previous.outputs.revision }}
+        run: |
+          if ./scripts/smoke.sh "$URL"; then
+            echo "Smoke test passed on $URL"
+          else
+            echo "::error::Smoke test failed"
+            if [ -n "$PREVIOUS" ]; then
+              gcloud run services update-traffic "$SERVICE" --region "$REGION" --to-revisions "$PREVIOUS=100"
+              echo "::warning::Rolled back traffic to $PREVIOUS"
+            fi
+            exit 1
+          fi

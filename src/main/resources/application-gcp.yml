@@ -1,0 +1,9 @@
+# Active on Cloud Run (SPRING_PROFILES_ACTIVE=gcp). Values come from env vars set by scripts/deploy.sh / deploy.yml.
+marketplace:
+  pubsub:
+    topic: ${PUBSUB_TOPIC:offer-events}
+    push:
+      verify: true
+      audience: ${PUSH_AUDIENCE}
+      service-account: ${PUSH_SERVICE_ACCOUNT}
+

@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Build and test
+        run: mvn -B verify
+      - name: Architecture rule — domain/application stay framework-free
+        run: |
+          if grep -rnE '^import (org\.springframework|com\.google|com\.fasterxml)' \
+               src/main/java/com/vx/marketplace/domain src/main/java/com/vx/marketplace/application; then
+            echo "::error::Framework import found in domain/application (see CLAUDE.md)"; exit 1
+          fi
