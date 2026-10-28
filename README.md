@@ -100,3 +100,4 @@ Cloud Run scales to zero (`min-instances=0`), so an idle demo costs close to not
 ## Backlog
 
 See [docs/backlog.md](docs/backlog.md). The workflow is explained in [docs/workflow.md](docs/workflow.md).
+
