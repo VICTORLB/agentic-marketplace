@@ -1,7 +1,10 @@
 package com.vx.marketplace.config;
 
+import com.vx.marketplace.adapter.out.memory.InMemoryDatabase;
 import com.vx.marketplace.adapter.out.memory.InMemoryListingRepository;
 import com.vx.marketplace.adapter.out.memory.InMemoryOfferRepository;
+import com.vx.marketplace.adapter.out.memory.InMemoryOutboxStore;
+import com.vx.marketplace.adapter.out.memory.InMemoryUnitOfWork;
 import com.vx.marketplace.adapter.out.memory.InMemoryProcessedMessageStore;
 import com.vx.marketplace.adapter.out.memory.LoggingEventPublisher;
 import org.springframework.context.annotation.Bean;
@@ -14,13 +17,28 @@ import org.springframework.context.annotation.Profile;
 public class LocalAdaptersConfig {
 
     @Bean
-    InMemoryListingRepository listingRepository() {
-        return new InMemoryListingRepository();
+    InMemoryDatabase inMemoryDatabase() {
+        return new InMemoryDatabase();
     }
 
     @Bean
-    InMemoryOfferRepository offerRepository() {
-        return new InMemoryOfferRepository();
+    InMemoryListingRepository listingRepository(InMemoryDatabase db) {
+        return new InMemoryListingRepository(db);
+    }
+
+    @Bean
+    InMemoryOfferRepository offerRepository(InMemoryDatabase db) {
+        return new InMemoryOfferRepository(db);
+    }
+
+    @Bean
+    InMemoryUnitOfWork unitOfWork(InMemoryDatabase db) {
+        return new InMemoryUnitOfWork(db);
+    }
+
+    @Bean
+    InMemoryOutboxStore outboxStore(InMemoryDatabase db) {
+        return new InMemoryOutboxStore(db);
     }
 
     @Bean

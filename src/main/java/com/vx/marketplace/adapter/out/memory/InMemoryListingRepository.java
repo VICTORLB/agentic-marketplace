@@ -3,22 +3,28 @@ package com.vx.marketplace.adapter.out.memory;
 import com.vx.marketplace.application.port.ListingRepository;
 import com.vx.marketplace.domain.Listing;
 
-import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
 
 /** Local/dev and test adapter. Not shared across Cloud Run instances. */
 public class InMemoryListingRepository implements ListingRepository {
 
-    private final Map<String, Listing> store = new ConcurrentHashMap<>();
+    private final InMemoryDatabase db;
+
+    public InMemoryListingRepository() {
+        this(new InMemoryDatabase());
+    }
+
+    public InMemoryListingRepository(InMemoryDatabase db) {
+        this.db = db;
+    }
 
     @Override
     public void save(Listing listing) {
-        store.put(listing.id(), listing);
+        db.putListing(listing);
     }
 
     @Override
     public Optional<Listing> findById(String id) {
-        return Optional.ofNullable(store.get(id));
+        return Optional.ofNullable(db.listing(id)).map(InMemoryDatabase.Versioned::value);
     }
 }
