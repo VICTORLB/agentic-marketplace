@@ -6,7 +6,10 @@ import com.vx.marketplace.application.port.OutboxMessage;
 import com.vx.marketplace.application.port.UnitOfWork;
 import com.vx.marketplace.application.port.UnitOfWorkContractTest;
 import com.vx.marketplace.domain.DomainEvent;
+import com.vx.marketplace.domain.BusinessRuleException;
+import com.vx.marketplace.domain.Listing;
 import com.vx.marketplace.domain.ListingStatus;
+import com.vx.marketplace.domain.Offer;
 import com.vx.marketplace.domain.OfferStatus;
 import org.junit.jupiter.api.Test;
 
@@ -21,7 +24,11 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Consumer;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -40,11 +47,6 @@ class InMemoryUnitOfWorkTest extends UnitOfWorkContractTest {
     protected UnitOfWork uow(int maxAttempts) {
         current = new InMemoryUnitOfWork(db, maxAttempts, GRACE);
         return current;
-    }
-
-    @Override
-    protected void beforeCommit(Consumer<Integer> hook) {
-        current.beforeCommit(hook);
     }
 
     @Override
@@ -210,5 +212,169 @@ class InMemoryUnitOfWorkTest extends UnitOfWorkContractTest {
         }
         pool.shutdown();
         return results;
+    }
+
+    @Test
+    void rerunsFunctionWhenReadDocumentChangesBeforeCommit() {
+        UnitOfWork uow = uow(3);
+        current.beforeCommit(attempt -> {
+            if (attempt == 1) {
+                listings.save(listing.markSold());
+            }
+        });
+        List<ListingStatus> seen = new ArrayList<>();
+
+        uow.execute(tx -> {
+            seen.add(tx.findListing("L").orElseThrow().status());
+            return null;
+        });
+
+        assertThat(seen).containsExactly(ListingStatus.ACTIVE, ListingStatus.SOLD);
+    }
+
+    @Test
+    void detectsPhantomOfferAddedToQueriedListing() {
+        UnitOfWork uow = uow(3);
+        current.beforeCommit(attempt -> {
+            if (attempt == 1) {
+                offers.save(Offer.place("B", "L", "buyer-2", 800, "k2", NOW));
+            }
+        });
+        List<Integer> sizes = new ArrayList<>();
+
+        uow.execute(tx -> {
+            sizes.add(tx.findOffersByListing("L").size());
+            return null;
+        });
+
+        assertThat(sizes).containsExactly(1, 2);
+    }
+
+    @Test
+    void throwsConcurrencyConflictAfterMaxAttempts() {
+        UnitOfWork uow = uow(3);
+        current.beforeCommit(attempt -> listings.save(new Listing("L", "seller", "Bike v" + attempt, 1000, "USD",
+                ListingStatus.ACTIVE, NOW)));
+        List<Integer> runs = new ArrayList<>();
+
+        assertThatThrownBy(() -> uow.execute(tx -> {
+            runs.add(1);
+            tx.findListing("L");
+            tx.save(offerA.accept());
+            return null;
+        })).isInstanceOf(com.vx.marketplace.application.port.ConcurrencyConflictException.class)
+                .hasMessageContaining("listing L");
+
+        assertThat(runs).hasSize(3);
+        assertThat(offers.findById("A")).contains(offerA);
+    }
+
+    @Test
+    void rerunsInsteadOfFailingWhenCompetingAcceptCommitsBetweenTwoReads() {
+        UnitOfWork uow = uow(3);
+        List<Integer> runs = new ArrayList<>();
+
+        boolean alreadyAccepted = uow.execute(tx -> {
+            runs.add(1);
+            Listing l = tx.findListing("L").orElseThrow();
+            if (runs.size() == 1) {
+                accept(new InMemoryUnitOfWork(db), "A"); // competitor commits between the two reads
+            }
+            return acceptIn(tx, l, "A");
+        });
+
+        assertThat(runs).hasSize(2);
+        assertThat(alreadyAccepted).isTrue();
+    }
+
+    @Test
+    void constructorRejectsInvalidSettings() {
+        assertThatThrownBy(() -> new InMemoryUnitOfWork(db, 0, GRACE)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new InMemoryUnitOfWork(db, 1, null)).isInstanceOf(NullPointerException.class);
+    }
+
+    @Test
+    void concurrentAcceptsOfTheSameOfferAllSucceedAndRecordOneEvent() throws Exception {
+        for (int rep = 0; rep < 300; rep++) {
+            Fixture f = new Fixture(1);
+            List<Boolean> results = f.race(8, i -> "A");
+
+            assertThat(results).as("rep %d", rep).containsOnly(true);
+            assertThat(f.outbox.all()).as("rep %d", rep).hasSize(1);
+        }
+    }
+
+    @Test
+    void concurrentAcceptsOfDifferentOffersHaveExactlyOneWinner() throws Exception {
+        for (int rep = 0; rep < 100; rep++) {
+            Fixture f = new Fixture(8);
+            List<Boolean> results = f.race(8, i -> "O" + i);
+
+            assertThat(results).as("rep %d", rep).containsOnlyOnce(true);
+            assertThat(f.offers.findByListingId("L")).filteredOn(o -> o.status() == OfferStatus.ACCEPTED).hasSize(1);
+            assertThat(f.outbox.all()).as("rep %d", rep).hasSize(1);
+        }
+    }
+
+    /** Domain accept inside a transaction; returns whether it was an idempotent retry. */
+    private boolean acceptIn(com.vx.marketplace.application.port.TransactionContext tx, Listing l, String offerId) {
+        Offer chosen = tx.findOffer(offerId).orElseThrow();
+        var outcome = l.acceptOffer(chosen, tx.findOffersByListing(l.id()));
+        if (!outcome.alreadyAccepted()) {
+            tx.save(outcome.sold());
+            tx.save(outcome.accepted());
+            outcome.rejected().forEach(tx::save);
+            tx.enqueue(message(java.util.UUID.randomUUID().toString()));
+        }
+        return outcome.alreadyAccepted();
+    }
+
+    private void accept(InMemoryUnitOfWork uow, String offerId) {
+        uow.execute(tx -> acceptIn(tx, tx.findListing("L").orElseThrow(), offerId));
+    }
+
+    /** Fresh database with listing L and pending offers O0..O(n-1) (plus A from the base fixture is unused). */
+    private final class Fixture {
+        final InMemoryDatabase d = new InMemoryDatabase();
+        final InMemoryListingRepository ls = new InMemoryListingRepository(d);
+        final InMemoryOfferRepository offers = new InMemoryOfferRepository(d);
+        final InMemoryOutboxStore outbox = new InMemoryOutboxStore(d);
+        final InMemoryUnitOfWork uow = new InMemoryUnitOfWork(d, 5, GRACE);
+
+        Fixture(int offerCount) {
+            ls.save(listing);
+            if (offerCount == 1) {
+                offers.save(offerA);
+            }
+            for (int i = 0; i < offerCount && offerCount > 1; i++) {
+                offers.save(Offer.place("O" + i, "L", "buyer-" + i, 100 + i, "k" + i, NOW.plusMillis(i)));
+            }
+        }
+
+        /** Runs n concurrent accepts released together; true = succeeded, false = business-rule failure. */
+        List<Boolean> race(int n, java.util.function.IntFunction<String> offerFor) throws Exception {
+            CountDownLatch start = new CountDownLatch(1);
+            var pool = Executors.newFixedThreadPool(n);
+            List<Future<Boolean>> futures = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                String offerId = offerFor.apply(i);
+                futures.add(pool.submit(() -> {
+                    start.await();
+                    try {
+                        accept(uow, offerId);
+                        return true;
+                    } catch (BusinessRuleException e) {
+                        return false;
+                    }
+                }));
+            }
+            start.countDown();
+            List<Boolean> results = new ArrayList<>();
+            for (var fu : futures) {
+                results.add(fu.get());
+            }
+            pool.shutdown();
+            return results;
+        }
     }
 }

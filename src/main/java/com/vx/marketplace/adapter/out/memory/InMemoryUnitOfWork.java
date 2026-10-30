@@ -35,9 +35,12 @@ public class InMemoryUnitOfWork implements UnitOfWork {
     }
 
     public InMemoryUnitOfWork(InMemoryDatabase db, int maxAttempts, Duration grace) {
+        if (maxAttempts < 1) {
+            throw new IllegalArgumentException("maxAttempts must be positive");
+        }
         this.db = db;
         this.maxAttempts = maxAttempts;
-        this.grace = grace;
+        this.grace = java.util.Objects.requireNonNull(grace, "grace");
     }
 
     /** TEST ONLY: runs after the function and before commit validation; receives the 1-based attempt number. */
@@ -55,7 +58,17 @@ public class InMemoryUnitOfWork implements UnitOfWork {
         String contendedListing = null;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             Context tx = new Context();
-            T result = work.apply(tx);
+            T result;
+            try {
+                result = work.apply(tx);
+            } catch (RuntimeException e) {
+                // A failure computed from stale reads is not authoritative: re-run against fresh state.
+                if (tx.readsAreCurrent()) {
+                    throw e;
+                }
+                contendedListing = tx.firstListingId;
+                continue;
+            }
             beforeCommit.accept(attempt);
             if (tx.tryCommit()) {
                 return result;
@@ -79,7 +92,7 @@ public class InMemoryUnitOfWork implements UnitOfWork {
         @Override
         public Optional<Listing> findListing(String id) {
             checkNoWrites();
-            var read = db.listing(id);
+            var read = locked(() -> db.listing(id));
             listingReads.putIfAbsent(id, read == null ? 0 : read.version());
             if (firstListingId == null) {
                 firstListingId = id;
@@ -90,7 +103,7 @@ public class InMemoryUnitOfWork implements UnitOfWork {
         @Override
         public Optional<Offer> findOffer(String id) {
             checkNoWrites();
-            var read = db.offer(id);
+            var read = locked(() -> db.offer(id));
             offerReads.putIfAbsent(id, read == null ? 0 : read.version());
             return Optional.ofNullable(read).map(InMemoryDatabase.Versioned::value);
         }
@@ -98,7 +111,7 @@ public class InMemoryUnitOfWork implements UnitOfWork {
         @Override
         public List<Offer> findOffersByListing(String listingId) {
             checkNoWrites();
-            var read = db.offersOfListing(listingId);
+            var read = locked(() -> db.offersOfListing(listingId));
             Map<String, Long> versions = new HashMap<>();
             read.forEach(v -> versions.put(v.value().id(), v.version()));
             queryReads.putIfAbsent(listingId, versions);
@@ -119,6 +132,20 @@ public class InMemoryUnitOfWork implements UnitOfWork {
         @Override
         public void enqueue(OutboxMessage message) {
             outboxWrites.add(message);
+        }
+
+        /** Reads take the commit lock so they never observe a half-applied commit. */
+        private <R> R locked(java.util.function.Supplier<R> read) {
+            db.lock.lock();
+            try {
+                return read.get();
+            } finally {
+                db.lock.unlock();
+            }
+        }
+
+        private boolean readsAreCurrent() {
+            return locked(this::readsStillCurrent);
         }
 
         private void checkNoWrites() {

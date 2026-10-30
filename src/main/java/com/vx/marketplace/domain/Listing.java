@@ -59,6 +59,9 @@ public record Listing(
         if (!id.equals(chosen.listingId())) {
             throw new IllegalArgumentException("Offer " + chosen.id() + " does not belong to listing " + id);
         }
+        if (allOffersOnListing.stream().anyMatch(o -> !id.equals(o.listingId()))) {
+            throw new IllegalArgumentException("Offers must all belong to listing " + id);
+        }
         if (status == ListingStatus.SOLD && chosen.status() == OfferStatus.ACCEPTED) {
             return new AcceptOutcome(this, chosen, List.of(), true);
         }

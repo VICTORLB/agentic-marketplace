@@ -60,4 +60,12 @@ class ListingTest {
         assertThatThrownBy(() -> active.acceptOffer(other, List.of()))
                 .isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    void acceptOfferRejectsListOfOffersContainingAnotherListingsOffer() {
+        Offer other = Offer.place("X", "other", "buyer-3", 700, "k9", NOW);
+
+        assertThatThrownBy(() -> active.acceptOffer(a, List.of(a, other)))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
 }
