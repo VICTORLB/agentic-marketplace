@@ -1,6 +1,7 @@
 package com.vx.marketplace.domain;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Objects;
 
 /** An item a seller puts up for sale. Immutable: state changes return a new instance. */
@@ -48,5 +49,28 @@ public record Listing(
             throw new BusinessRuleException("Listing " + id + " is not active");
         }
         return new Listing(id, sellerId, title, priceCents, currency, ListingStatus.SOLD, createdAt);
+    }
+
+    /**
+     * Pure accept rule. Re-accepting the already accepted offer of a sold listing is a no-op (idempotent retry);
+     * otherwise the listing must be active and the chosen offer pending. Every other pending offer is rejected.
+     */
+    public AcceptOutcome acceptOffer(Offer chosen, List<Offer> allOffersOnListing) {
+        if (!id.equals(chosen.listingId())) {
+            throw new IllegalArgumentException("Offer " + chosen.id() + " does not belong to listing " + id);
+        }
+        if (allOffersOnListing.stream().anyMatch(o -> !id.equals(o.listingId()))) {
+            throw new IllegalArgumentException("Offers must all belong to listing " + id);
+        }
+        if (status == ListingStatus.SOLD && chosen.status() == OfferStatus.ACCEPTED) {
+            return new AcceptOutcome(this, chosen, List.of(), true);
+        }
+        Listing sold = markSold();
+        Offer accepted = chosen.accept();
+        List<Offer> rejected = allOffersOnListing.stream()
+                .filter(o -> !o.id().equals(chosen.id()) && o.isPending())
+                .map(Offer::reject)
+                .toList();
+        return new AcceptOutcome(sold, accepted, rejected, false);
     }
 }
