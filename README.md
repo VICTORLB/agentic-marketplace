@@ -83,7 +83,7 @@ Hooks need `bash` plus `jq` or `python3` (on Windows, run Claude Code from Git B
 
 Cloud Run scales to zero (`min-instances=0`), so an idle demo costs close to nothing.
 
-## Design notes and trade-offs (good interview material)
+## Design notes and trade-offs
 
 - **Idempotency everywhere:** client retries use `Idempotency-Key`, and Pub/Sub consumers de-duplicate by
   `messageId` through a Firestore transaction (Pub/Sub is at-least-once).

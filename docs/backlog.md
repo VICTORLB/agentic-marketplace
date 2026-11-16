@@ -2,7 +2,7 @@
 
 Each item is phrased as a business need on purpose: turning it into a spec is the `product-planner`'s job.
 
-## 1. Accepting an offer must be all-or-nothing  ← start here
+## 1. Accepting an offer must be all-or-nothing  (in progress: step 1 of 4 merged)
 
 Sellers have reported a listing showing two accepted offers. Today `acceptOffer` does several separate writes
 and then publishes, so two concurrent accepts can both succeed, and a crash between the writes and the publish
